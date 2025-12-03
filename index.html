@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en" color-mode="user">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AADE 39A One-Time Password Helper</title>
+  <link rel="stylesheet" href="https://unpkg.com/mvp.css" media="(prefers-color-scheme: dark)">
+  <style>
+    :root { color-scheme: dark; }
+    body { max-width: 900px; margin: 0 auto; }
+    .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; }
+    .inline { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+    #status { white-space: pre-line; }
+    .otp-item { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
+    .hidden { display: none; }
+    small.muted { opacity: 0.7; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/doedje/jquery.soap/jquery.soap.js"></script>
+</head>
+<body>
+  <header>
+    <h1>AADE 39A – Buyer OTP (One Time Password) Helper</h1>
+    <p id="cors-note">
+      This page calls the AADE SOAP service directly. Browsers will block it without a same-origin proxy.<br>
+      Run behind a tiny local reverse proxy that adds <code>Access-Control-Allow-Origin: *</code> (e.g. nginx, mitmproxy, or a minimal Node/Express proxy),
+      or launch your browser with CORS disabled for testing only.
+    </p>
+  </header>
+
+  <section>
+    <h2>Environment</h2>
+    <label class="inline">
+      <input type="checkbox" id="test-mode">
+      Use test endpoint (<code>https://test.gsis.gr/wsaade/VtWs39aFPA/VtWs39aFPA</code>)
+    </label>
+  </section>
+
+  <section>
+    <h2>Credentials & Identification</h2>
+    <div class="row">
+      <label>Username
+        <input id="username" autocomplete="username">
+      </label>
+      <label>Password
+        <input id="password" type="password" autocomplete="current-password">
+      </label>
+      <label>Buyer AFM (VAT ID)
+        <input id="buyer-afm" inputmode="numeric" minlength="9" maxlength="9">
+      </label>
+      <label class="inline">
+        <input type="checkbox" id="same-afm" checked>
+        Representative AFM is the same as buyer
+      </label>
+      <label id="rep-afm-wrap">Representative AFM (if different)
+        <input id="rep-afm" inputmode="numeric" minlength="9" maxlength="9" disabled>
+      </label>
+      <label>Gov ID (last 5 digits, if required)
+        <input id="gov-id" inputmode="numeric" maxlength="5">
+        <small class="muted">Only some flows require this; included for completeness.</small>
+      </label>
+    </div>
+    <p>Retrieved full name / company name will appear here: <strong id="fullname">—</strong></p>
+  </section>
+
+  <section class="inline">
+    <button id="validate-btn">Validate & Fetch Name (Bu3)</button>
+    <button id="otp-btn">Generate OTP (Bu9)</button>
+    <label class="inline">
+      OTP size
+      <input id="otp-size" type="number" min="1" max="10" value="1" style="width:6rem">
+    </label>
+    <label class="inline">
+      Days to live
+      <input id="otp-days" type="number" min="1" max="30" value="1" style="width:6rem">
+    </label>
+  </section>
+
+  <section>
+    <h2>Results</h2>
+    <div id="status" role="status"></div>
+    <div id="otp-list"></div>
+  </section>
+
+  <script>
+    // Endpoints
+    const ENDPOINT_TEST = 'https://test.gsis.gr/wsaade/VtWs39aFPA/VtWs39aFPA';
+    const ENDPOINT_LIVE = 'https://www1.gsis.gr/wsaade/VtWs39aFPA/VtWs39aFPA';
+
+    const TEST_PRESET = {
+      username: 'TEST39AFPA05PKV',
+      password: 'TEST39AFPA05PKV',
+      buyerAfm: '660073151',
+      repAfm: '660073151',
+      govId: '72968'
+    };
+
+    const ns = 'http://vtws39afpa/VtWs39aFPA';
+    const nsSvc = 'http://vtws39afpa/VtWs39aFPAService';
+
+    const $u = $('#username');
+    const $p = $('#password');
+    const $b = $('#buyer-afm');
+    const $r = $('#rep-afm');
+    const $same = $('#same-afm');
+    const $gid = $('#gov-id');
+    const $full = $('#fullname');
+    const $status = $('#status');
+    const $otpList = $('#otp-list');
+    const $test = $('#test-mode');
+    const $otpSize = $('#otp-size');
+    const $otpDays = $('#otp-days');
+
+    function currentEndpoint() {
+      return $test.prop('checked') ? ENDPOINT_TEST : ENDPOINT_LIVE;
+    }
+
+    function setStatus(msg, ok = true) {
+      $status.text(msg).css('color', ok ? 'var(--color, #9fef00)' : '#f66');
+    }
+
+    function toggleButtons(disabled) {
+      $('#validate-btn, #otp-btn').prop('disabled', disabled);
+    }
+
+    function ensureRepAfmState() {
+      const same = $same.prop('checked');
+      $r.prop('disabled', same);
+      if (same) $r.val($b.val());
+    }
+    $same.on('change', ensureRepAfmState);
+    $b.on('input', () => { if ($same.prop('checked')) $r.val($b.val()); });
+
+    $test.on('change', () => {
+      if ($test.prop('checked')) {
+        $u.val(TEST_PRESET.username);
+        $p.val(TEST_PRESET.password);
+        $b.val(TEST_PRESET.buyerAfm);
+        $same.prop('checked', true);
+        ensureRepAfmState();
+        $gid.val(TEST_PRESET.govId);
+      } else {
+        $u.val('');
+        $p.val('');
+        $b.val('');
+        $same.prop('checked', true);
+        $r.val('');
+        ensureRepAfmState();
+        $gid.val('');
+        $full.text('—');
+        setStatus('');
+        $otpList.empty();
+      }
+    });
+
+    function requireFields() {
+      if (!$u.val() || !$p.val() || !$b.val() || (!$same.prop('checked') && !$r.val())) {
+        setStatus('Please fill username, password, buyer AFM, and representative AFM (if different).', false);
+        return false;
+      }
+      return true;
+    }
+
+    function soapCall(method, bodyObj, onSuccess) {
+      toggleButtons(true);
+      setStatus('Contacting service…');
+      $.soap({
+        url: currentEndpoint(),
+        appendMethodToURL: false,
+        method: method,
+        namespaceURL: nsSvc,
+        SOAPAction: '',
+        data: bodyObj,
+        wssUsername: $u.val(),
+        wssPassword: $p.val(),
+        enableLogging: false,
+        success: function (soapResponse) {
+          toggleButtons(false);
+          try {
+            onSuccess(soapResponse.toXML());
+          } catch (e) {
+            setStatus('Parse error: ' + e.message, false);
+          }
+        },
+        error: function (err) {
+          toggleButtons(false);
+          setStatus('Network / CORS / SOAP error: ' + (err && err.toString ? err.toString() : 'unknown'), false);
+        }
+      });
+    }
+
+    function parseMessage(xml) {
+      const code = xml.querySelector('message_code');
+      const descr = xml.querySelector('message_descr');
+      if (code && code.textContent.trim()) {
+        return { code: code.textContent.trim(), descr: descr ? descr.textContent.trim() : '' };
+      }
+      return null;
+    }
+
+    function parseFullname(xml) {
+      const n = xml.querySelector('buyer_fullname, call_fullname');
+      return n ? n.textContent.trim() : null;
+    }
+
+    function parseOtps(xml) {
+      const items = [];
+      xml.querySelectorAll('bu9_otpout_tab > item').forEach(node => {
+        items.push({
+          id: node.querySelector('otp_id')?.textContent?.trim(),
+          start: node.querySelector('otp_valid_start_datetime')?.textContent?.trim(),
+          end: node.querySelector('otp_valid_end_datetime')?.textContent?.trim(),
+          usage: node.querySelector('otp_usage_flag')?.textContent?.trim()
+        });
+      });
+      return items;
+    }
+
+    $('#validate-btn').on('click', () => {
+      if (!requireFields()) return;
+      const buyerAfm = $b.val().trim();
+      const body = {
+        'BU3_IN_REC': {
+          'buyer_afm': buyerAfm
+        }
+      };
+      soapCall('vt39afpaBu3GetBuyer', body, (xml) => {
+        const msg = parseMessage(xml);
+        const name = parseFullname(xml);
+        if (name) $full.text(name);
+        if (msg) setStatus(`${msg.code}: ${msg.descr}`, msg.code.toLowerCase().includes('success'));
+        else setStatus('User validated successfully.');
+      });
+    });
+
+    $('#otp-btn').on('click', () => {
+      if (!requireFields()) return;
+      const buyerAfm = $b.val().trim();
+      const repAfm = ($same.prop('checked') ? buyerAfm : $r.val().trim());
+      const body = {
+        'BU9_IN_REC': {
+          'buyer_afm': buyerAfm,
+          'repr_afm': repAfm,
+          'otp_action_requested': 'C',
+          'otp_size_requested': $otpSize.val() ? Number($otpSize.val()) : undefined,
+          'otp_days_to_live': $otpDays.val() ? Number($otpDays.val()) : undefined
+        }
+      };
+      soapCall('vt39afpaBu9GetOtp', body, (xml) => {
+        const msg = parseMessage(xml);
+        const otps = parseOtps(xml);
+        if (msg) setStatus(`${msg.code}: ${msg.descr}`, msg.code.toLowerCase().includes('success'));
+        else setStatus('OTP generated successfully.');
+        renderOtps(otps);
+        if (otps.length) navigator.clipboard?.writeText(otps[0].id || '');
+      });
+    });
+
+    function renderOtps(otps) {
+      $otpList.empty();
+      if (!otps.length) {
+        $otpList.append('<p>No OTPs returned.</p>');
+        return;
+      }
+      otps.forEach(o => {
+        const row = $(`
+          <div class="otp-item">
+            <div>
+              <strong>${o.id || '—'}</strong><br>
+              <small>${o.start || ''} — ${o.end || ''}</small>
+            </div>
+            <button data-otp="${o.id || ''}">Copy</button>
+          </div>
+        `);
+        row.find('button').on('click', (e) => {
+          const v = $(e.currentTarget).data('otp');
+          navigator.clipboard?.writeText(v || '');
+          setStatus('Copied OTP to clipboard.');
+        });
+        $otpList.append(row);
+      });
+    }
+
+    // Initialize representative field state
+    ensureRepAfmState();
+  </script>
+</body>
+</html>
